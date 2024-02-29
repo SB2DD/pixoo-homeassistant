@@ -10,10 +10,10 @@ show_message:
       name: IMPORTANT INFORMATION FOR THE TEXT
       description: "For every message you have, you NEED to specify its position, its color and its font."
       required: false
-      default: "."
+      value: "None"
       selector:
         constant:
-          label: "(This is just for the information)"
+          label: "(This is just for the information, selecting this is useless)"
     messages:
       name: Messages
       description: 'The messages to display. Example: ["Hello World!", "How are you?"]'
@@ -46,6 +46,7 @@ show_message:
       name: IMPORTANT INFORMATION FOR THE IMAGES
       description: "For every image you have, you NEED to specify its position and the image to display."
       required: false
+      value: "None"
       selector:
         constant:
           label: "(Still nothing)"
