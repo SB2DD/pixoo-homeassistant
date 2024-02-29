@@ -11,6 +11,7 @@ show_message:
       description: "For every message you have, you NEED to specify its position, its color and its font."
       required: false
       selector:
+        value: "No"
         constant:
           label: "(This is just for the information, selecting this is useless)"
     messages:
@@ -46,6 +47,7 @@ show_message:
       description: "For every image you have, you NEED to specify its position and the image to display."
       required: false
       selector:
+        value: "No"
         constant:
           label: "(Still nothing)"
     images:
