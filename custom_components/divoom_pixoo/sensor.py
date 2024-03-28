@@ -126,6 +126,8 @@ class Pixoo64(Entity):
             pixoo.set_custom_page(page['id'])
         elif page_type == "clock":
             pixoo.set_clock(page['id'])
+        elif page_type == "cloud_channel":
+            pixoo.set_cloud_channel(page['id'])
         elif page_type in ["custom", "components"]:
             for component in page['components']:
 

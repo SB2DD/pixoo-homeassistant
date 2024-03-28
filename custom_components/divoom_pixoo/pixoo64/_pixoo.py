@@ -389,6 +389,16 @@ class Pixoo:
         if data['error_code'] != 0:
             self.__error(data)
 
+    # cloud index 0:Recommend gallery;1:Favourite;2:Subscribe artist;3:album
+    def set_cloud_channel(self, cloud_index):
+        response = requests.post(self.__url, json.dumps({
+            'Command': 'Channel/CloudIndex',
+            'Index': cloud_index
+        }), timeout=self.timeout)
+        data = response.json()
+        if data['error_code'] != 0:
+            self.__error(data)
+
     # buzz_time 	Working time of buzzer in one cycle in milliseconds
     # idle_time		Idle time of buzzer in one cycle in milliseconds
     # total_time	Working total time of buzzer in milliseconds
