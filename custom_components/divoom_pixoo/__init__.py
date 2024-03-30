@@ -1,7 +1,20 @@
 # __init__.py
+import time
+from http import HTTPStatus
+
+from aiohttp import web
+from homeassistant.auth.models import User
+import homeassistant.core as ha
+from homeassistant.auth.permissions.const import POLICY_READ
+from homeassistant.components.http import HomeAssistantView, KEY_HASS_USER, KEY_HASS
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import CONTENT_TYPE_JSON
 from homeassistant.core import HomeAssistant
 import logging
+
+from homeassistant.exceptions import Unauthorized
+from homeassistant.helpers.json import json_bytes
+
 from .const import CURRENT_ENTRY_VERSION, DOMAIN, VERSION
 from .pixoo64 import Pixoo
 
@@ -30,8 +43,53 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, update=Fals
     if not update:
         entry.add_update_listener(async_update_entry)
 
+    hass.http.register_view(APIEntityStateView)
+
     return True
 
+
+class APIEntityStateView(HomeAssistantView):
+    """View to handle EntityState requests."""
+
+    url = "/api/pixoo/{entity_id}/{test}"
+    name = "api:divoom_pixoo:entity_state"
+    requires_auth = False
+
+    @ha.callback
+    def get(self, request: web.Request, entity_id: str, test: str) -> web.Response:
+        """Retrieve state of entity."""
+        hass = request.app[KEY_HASS]
+        # if not user.permissions.check_entity(entity_id, POLICY_READ):
+        #     raise Unauthorized(entity_id=entity_id)
+        _LOGGER.error("Entity ID: %s", entity_id)
+        _LOGGER.error("Test: %s", test)
+
+        return web.Response(
+            body=json_bytes({"DispData": str(time.time())}),
+            content_type=CONTENT_TYPE_JSON,
+        )
+        # return self.json_message("Entity not found.", HTTPStatus.NOT_FOUND)
+
+# Test packet
+#   {
+#     "Command":"Draw/SendHttpItemList",
+#     "ItemList":[
+#                         {
+#             "TextId":20,
+#             "type":23,
+#             "x":0,
+#             "y":48,
+#             "dir":0,
+#             "font":4,
+#             "TextWidth":64,
+#             "Textheight":16,
+#             "speed":100,
+#             "update_time":3,
+#             "align":1,
+#             "TextString":"http://10.0.108.238:8123/api/pixoo/1/fagggsdfasdfadfasasdfadfsdfasasdfdfsafsdadfsfjkhdasjklfhaklsdfhkljasdfhsdlkfhasldkjhsdafjklhasdfasdfkagrlighfuhegoil;arehgo;lheiolpgaergasdfsdf",
+#             "color":"#FFF000"
+#         }]
+# }
 
 def load_pixoo(ip_address: str):
     """Load the Pixoo device. This is a blocking call."""
@@ -56,7 +114,7 @@ async def async_update_entry(hass: HomeAssistant, entry: ConfigEntry):
 
 async def async_detect_and_fix_old_entry(hass: HomeAssistant, config_entry: ConfigEntry):
     """Detect old entry. Called for every entry when HA find the versions don't match."""
-    if "page" in config_entry.options["pages_data"][0]:
+    if config_entry.options["pages_data"] and "page" in config_entry.options["pages_data"][0]:
         # Detected a v1 entry
         config_entry.version = 1
         await async_migrate_entry(hass, config_entry)
