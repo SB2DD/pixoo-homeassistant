@@ -1,7 +1,8 @@
 import asyncio
 import base64
 import logging
-from datetime import timedelta, datetime
+from asyncio import Task
+from datetime import timedelta
 from io import BytesIO
 
 import requests
@@ -12,10 +13,10 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity import Entity
-from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.template import Template, TemplateError
 from urllib3.exceptions import NewConnectionError
 
+from . import Pixoo
 from .pixoo64._colors import get_rgb, CSS4_COLORS, render_color
 from .const import DOMAIN, VERSION
 from .pages._pages import special_pages
@@ -31,19 +32,18 @@ async def async_setup_entry(hass: HomeAssistant, config_entry: ConfigEntry, asyn
 
 class Pixoo64(Entity):
 
-    def __init__(self, pages="", scan_interval=timedelta(seconds=15), pixoo=None, config_entry=None):
+    def __init__(self, pixoo: Pixoo, config_entry: ConfigEntry):
         # self._ip_address = ip_address
         self._pixoo = pixoo
         self._config_entry = config_entry
-        self._pages = self._config_entry.options.get('pages_data', pages)
-        self._scan_interval = timedelta(seconds=int(self._config_entry.options.get('scan_interval', scan_interval)))
+        self._pages = self._config_entry.options.get('pages_data', "")
+        self._scan_interval = timedelta(seconds=int(self._config_entry.options.get('scan_interval', timedelta(seconds=15))))
         self._current_page_index = -1  # Start at -1 so that the first page is 0.
-        self._current_page = None
         self._attr_has_entity_name = True
         self._attr_name = 'Current Page'
         self._attr_extra_state_attributes = {'TotalPages': len(self._pages)}
         _LOGGER.debug("All pages for %s: %s", self._pixoo.address, self._pages)
-        self._notification_before = datetime.now()
+        self._update_task: None | Task = None
 
     async def async_added_to_hass(self):
         # Register the buzz service
@@ -79,26 +79,27 @@ class Pixoo64(Entity):
         # Continue with the setup
         if DOMAIN in self.hass.data:
             self.hass.data[DOMAIN].setdefault('entities', []).append(self)
-        self._update_interval = async_track_time_interval(
-            self.hass,
-            self._async_update,
-            self._scan_interval
-        )
-        await self._async_update()
+        await self._async_next_page()
 
     async def async_will_remove_from_hass(self):
         """When entity is being removed from hass."""
-        if self._update_interval is not None:
-            self._update_interval()
-            self._update_interval = None
+        pass
 
-    async def _async_update(self, now=None):
-        _LOGGER.debug("Update called at %s for %s", now, self._pixoo.address)
-        await self._async_next_page()
+    async def async_schedule_next_page(self, wait_time: float):
+        _LOGGER.debug("Scheduling next page in %s seconds for %s", wait_time, self._pixoo.address)
+
+        async def task():
+            try:
+                await asyncio.sleep(wait_time)
+                await self._async_next_page()
+            except asyncio.CancelledError:
+                _LOGGER.debug('Next page timer cancelled for %s', self._pixoo.address)
+        # Using HA's async_create_task instead of asyncio.create_task because it's better for HA.
+        # (Also, from the docs, it automatically cancels the task when the entry is unloaded.)
+        self._update_task = self._config_entry.async_create_background_task(self.hass, task(), "pixoo-next-page-timer")
 
     async def _async_next_page(self):
-        if self._notification_before > datetime.now():
-            return
+        _LOGGER.debug("Loading next page for %s", self._pixoo.address)
 
         if len(self._pages) == 0:
             return
@@ -121,13 +122,15 @@ class Pixoo64(Entity):
                 is_enabled = False
 
             if is_enabled:
+                duration = float(self.page.get('duration', self._scan_interval.total_seconds()))
                 self.schedule_update_ha_state()
                 await self.hass.async_add_executor_job(self._render_page, self.page)
+                await self.async_schedule_next_page(duration)
             else:
                 self._current_page_index = (self._current_page_index + 1) % len(self._pages)
                 iteration_count += 1
 
-    def _render_page(self, page):
+    def _render_page(self, page: dict):
         pixoo = self._pixoo
         pixoo.clear()
 
@@ -141,26 +144,37 @@ class Pixoo64(Entity):
             pixoo.set_visualizer(page['id'])
         elif page_type == "clock":
             pixoo.set_clock(page['id'])
+        elif page_type == "gif":
+            pixoo.play_gif(page['gif_url'])
         elif page_type in ["custom", "components"]:
-            for component in page['components']:
+            variables = page.get('variables', {})
+            rendered_variables = {}
+            for var_name in variables:
+                rendered_variables[var_name] = Template(str(variables[var_name]), self.hass).async_render()
+
+            components: list = page['components'].copy()  # Copy the list so we can add new items to it.
+            for index, component in enumerate(components):
 
                 if component['type'] == "text":
-                    text_template = Template(str(component['content']), self.hass)
                     try:
-                        rendered_text = str(text_template.async_render())
+                        rendered_text = str(Template(str(component['content']), self.hass).async_render(variables=rendered_variables))
                     except TemplateError as e:
                         _LOGGER.error("Template render error: %s", e)
                         rendered_text = "Template Error"
 
-                    font = FONT_PICO_8  # Font by default.
-                    if component['font'] == "PICO_8":
-                        font = FONT_PICO_8
-                    elif component['font'] == "GICKO":
+                    font_name = component.get('font', "").lower()
+                    if font_name == "gicko":
                         font = FONT_GICKO
-                    elif component['font'] == "FIVE_PIX":
+                    elif font_name == "five_pix":
                         font = FIVE_PIX
+                    elif font_name == "eleven_pix":
+                        font = ELEVEN_PIX
+                    elif font_name == "clock":
+                        font = CLOCK
+                    else:
+                        font = FONT_PICO_8  # Font by default.
 
-                    rendered_color = render_color(component['color'], self.hass)
+                    rendered_color = render_color(component.get('color'), self.hass, variables=rendered_variables)
 
                     pixoo.draw_text(rendered_text.upper(), tuple(component['position']), rendered_color, font)
 
@@ -168,17 +182,17 @@ class Pixoo64(Entity):
                     try:
                         if "image_path" in component:
                             # File
-                            rendered_image_path = Template(str(component['image_path']), self.hass).async_render()
+                            rendered_image_path = Template(str(component['image_path']), self.hass).async_render(variables=rendered_variables)
                             img = Image.open(rendered_image_path)
                         elif "image_url" in component:
                             # URL/Web
-                            rendered_image_path = Template(str(component['image_url']), self.hass).async_render()
+                            rendered_image_path = Template(str(component['image_url']), self.hass).async_render(variables=rendered_variables)
                             response = requests.get(rendered_image_path, timeout=pixoo.timeout)
                             img = Image.open(BytesIO(response.content))
                         elif "image_data" in component:
                             # Base64
                             # Use a website like https://base64.guru/converter/encode/image to encode the image.
-                            rendered_image_data = Template(str(component['image_data']), self.hass).async_render()
+                            rendered_image_data = Template(str(component['image_data']), self.hass).async_render(variables=rendered_variables)
                             img = Image.open(BytesIO(base64.b64decode(rendered_image_data)))
                         else:
                             continue
@@ -187,7 +201,7 @@ class Pixoo64(Entity):
                         # (If too big, it's handled in the _pixoo class)
 
                         # You can "see" the difference here: https://i.stack.imgur.com/bKlzT.png
-                        rendered_resample_mode = str(Template(str(component.get('resample_mode', "box")), self.hass).async_render()).lower()
+                        rendered_resample_mode = str(Template(str(component.get('resample_mode', "box")), self.hass).async_render(variables=rendered_variables)).lower()
                         if rendered_resample_mode == "nearest" or rendered_resample_mode == "pixel_art":
                             resample_mode = Image.NEAREST
                         elif rendered_resample_mode == "bilinear":
@@ -217,11 +231,45 @@ class Pixoo64(Entity):
                     except TimeoutError as e:
                         _LOGGER.error("Timeout error: %s", e)
 
+                elif component['type'] == "rectangle":
+                    try:
+                        rendered_color = render_color(component.get('color'), self.hass, variables=rendered_variables)
+
+                        position = [
+                            int(Template(str(position), self.hass).async_render(variables=rendered_variables)) for position in
+                            component['position']
+                        ]
+                        size = [
+                            int(Template(str(size), self.hass).async_render(variables=rendered_variables)) for size in
+                            component['size']
+                        ]
+
+                        size = (size[0] - 1, size[1] - 1)
+
+                        rendered_fill = bool(Template(str(component.get('filled', True)), self.hass).async_render(variables=rendered_variables))
+
+                        if rendered_fill:
+                            pixoo.draw_filled_rectangle(position, (position[0] + size[0], position[1] + size[1]), rendered_color)
+                        else:
+                            pixoo.draw_line(position, (position[0] + size[0], position[1]), rendered_color)
+                            pixoo.draw_line((position[0] + size[0], position[1]), (position[0] + size[0], position[1] + size[1]), rendered_color)
+                            pixoo.draw_line((position[0] + size[0], position[1] + size[1]), (position[0], position[1] + size[1]), rendered_color)
+                            pixoo.draw_line((position[0], position[1] + size[1]), position, rendered_color)
+
+                    except TemplateError as e:
+                        _LOGGER.error("Template render error: %s", e)
+                elif component["type"] == "templatable":
+                    try:
+                        rendered_list = list(Template(str(component.get("template", [])), self.hass).async_render(variables=rendered_variables))
+                        for item in rendered_list[::-1]:  # Reverse the list so that the order is correct.
+                            components.insert(index + 1, item)
+
+                    except TemplateError as e:
+                        _LOGGER.error("Template render error: %s", e)
+
             pixoo.push()
 
     # Service to show a message.
-    # Comment: By calling this, it's possible that next_page "skips" a page, therefore looking like a next page takes
-    # longer than normal. I'm not 100% certain on how to make this work properly...
     async def async_show_message(self, call):
         page_data = call.data.get('page_data')
         duration = timedelta(seconds=call.data.get('duration', self._scan_interval.seconds))
@@ -234,9 +282,9 @@ class Pixoo64(Entity):
             self._render_page(page_data)
 
         await self.hass.async_add_executor_job(draw)
-        self._notification_before = datetime.now() + duration
-    #     By not using the sleep method, HA will show a success thingy in the UI.
-    #     If not, the success will only appear after the sleep time.
+        if self._update_task:
+            self._update_task.cancel()
+            await self.async_schedule_next_page(duration.total_seconds())
 
     # Service to play the buzzer
     async def async_play_buzzer(self, call):
